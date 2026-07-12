@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    ".",
+    "analysis",
+    "player",
+]
+
+[package]
+name = "score_analysis"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+analysis = { path = "analysis" }
+player = { path = "player" }
