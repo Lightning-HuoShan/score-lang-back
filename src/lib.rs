@@ -16,6 +16,9 @@
 //! export_midi(&score, std::path::Path::new("output.mid")).unwrap();
 //! ```
 
+pub mod analysis;
+pub mod player;
+
 pub use analysis::kind;
 pub use analysis::parser;
 

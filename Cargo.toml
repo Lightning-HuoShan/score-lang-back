@@ -1,9 +1,3 @@
-[workspace]
-members = [
-    "analysis",
-    "player",
-]
-
 [package]
 name = "score_analysis"
 version = "0.1.0"
@@ -11,14 +5,9 @@ edition = "2024"
 description = "ScoreLang 乐谱解析与 MIDI 处理库"
 authors = ["you"]
 license = "MIT OR Apache-2.0"
-repository = ""
-
-[lib]
-name = "score_analysis"
-path = "src/lib.rs"
+repository = "https://github.com/Lightning-HuoShan/score-lang-back"
 
 [dependencies]
-analysis = { path = "analysis" }
-player = { path = "player" }
+midir = "0.11"
 
 [dev-dependencies]
