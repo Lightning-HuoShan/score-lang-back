@@ -52,11 +52,20 @@ impl TimeSig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PedalKind {
+    Sustain,
+    Soft,
+    Sostenuto,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum LocalControl {
     LocalKey(Key),
     LocalTempo(Tempo),
     LocalTime(TimeSig),
+    PedalOn(PedalKind),
+    PedalOff(PedalKind),
 }
 
 #[derive(Debug, Clone)]
@@ -133,17 +142,18 @@ impl Score {
     pub fn set_global_time(&mut self, sig: TimeSig) { self.global_time = Some(sig); }
     pub fn push_track(&mut self, track: Track) { self.tracks.push(track); }
 
+    /// 收集乐谱中所有音符的引用（不展开段落重复）
+    ///
+    /// 说明：`repeat_times` 只在播放/导出时展开（见 `score_to_midi`、`live_player`），
+    /// 此处返回的是源码中实际书写的音符，避免对同一引用重复计数。
     pub fn all_notes<'a>(&'a self) -> Vec<&'a Note> {
         let mut notes = Vec::new();
         for track in &self.tracks {
             for section in &track.sections {
-                let repeat = section.repeat_times.unwrap_or(1);
-                for _ in 0..repeat {
-                    for measure in &section.measures {
-                        for event in &measure.events {
-                            if let MeasureEvent::Note(note) = event {
-                                notes.push(note);
-                            }
+                for measure in &section.measures {
+                    for event in &measure.events {
+                        if let MeasureEvent::Note(note) = event {
+                            notes.push(note);
                         }
                     }
                 }
@@ -152,17 +162,17 @@ impl Score {
         notes
     }
 
+    /// 收集乐谱中所有和弦的引用（不展开段落重复）
+    ///
+    /// 语义同 [`all_notes`](Self::all_notes)。
     pub fn all_chords<'a>(&'a self) -> Vec<&'a Chord> {
         let mut chords = Vec::new();
         for track in &self.tracks {
             for section in &track.sections {
-                let repeat = section.repeat_times.unwrap_or(1);
-                for _ in 0..repeat {
-                    for measure in &section.measures {
-                        for event in &measure.events {
-                            if let MeasureEvent::Chord(chord) = event {
-                                chords.push(chord);
-                            }
+                for measure in &section.measures {
+                    for event in &measure.events {
+                        if let MeasureEvent::Chord(chord) = event {
+                            chords.push(chord);
                         }
                     }
                 }

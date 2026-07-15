@@ -140,6 +140,21 @@ impl Key {
         Some(scale[degree as usize - 1].acc)
     }
 
+    /// 判断给定音名在该调号中是否需要变音记号
+    ///
+    /// 例如 G major 中 F 返回 Sharp，C 大调中 C 返回 Natural
+    pub fn accidental_for_note_name(&self, note_name: char) -> Accidental {
+        let scale = self.scale();
+        let target_name = note_name.to_ascii_uppercase();
+        for pc in &scale {
+            if pc.name == target_name {
+                return pc.acc;
+            }
+        }
+        // 音阶中没有这个音名（不应该出现，7 个音名各出现一次）
+        Accidental::Natural
+    }
+
     /// 调号中的升降号数量（正数=升号，负数=降号）
     ///
     /// 例如 C major=0, G major=1, F major=-1

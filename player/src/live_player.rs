@@ -7,7 +7,7 @@ use std::time::{Duration as StdDuration, Instant};
 
 use midir::MidiOutput;
 
-use analysis::kind::score::{Score, MeasureEvent, LocalControl};
+use analysis::kind::score::{Score, MeasureEvent, LocalControl, PedalKind};
 use analysis::kind::note_value::Duration;
 
 /// 播放速度倍率
@@ -25,17 +25,10 @@ fn build_event_timeline(score: &Score, ppq: u16) -> Vec<TimedMidiEvent> {
     let bpm = score.global_bpm().max(1) as u64;
     let us_per_tick = 60_000_000 / (bpm * ppq as u64);
     let mut events = Vec::new();
-    let mut current_tick: u64 = 0;
 
-    // 全局速度事件（放在最前面）
-    let us_per_quarter = 60_000_000 / bpm;
-    events.push(TimedMidiEvent {
-        timestamp_us: 0,
-        data: vec![0xFF, 0x51, 0x03,
-            (us_per_quarter >> 16) as u8,
-            (us_per_quarter >> 8) as u8,
-            us_per_quarter as u8],
-    });
+    // 注意：实时 MIDI 协议不传输 SMF meta 事件（0xFF...），
+    // tempo 已被烘焙进下方各事件的 timestamp_us（通过 us_per_tick 换算），
+    // 因此无需也不应在此推送 Tempo Meta 事件。
 
     for (track_idx, track) in score.tracks.iter().enumerate() {
         let channel = (track_idx as u8).min(15);
@@ -104,8 +97,27 @@ fn build_event_timeline(score: &Score, ppq: u16) -> Vec<TimedMidiEvent> {
                                 }
                             }
                             MeasureEvent::Control(control) => {
-                                if let LocalControl::LocalTempo(_) = control {
-                                    // 局部速度变化暂不支持实时调整
+                                match control {
+                                    LocalControl::LocalTempo(_) => {
+                                        // 局部速度变化暂不支持实时调整
+                                    }
+                                    LocalControl::LocalKey(_) | LocalControl::LocalTime(_) => {
+                                        // 局部调号和拍号不影响实时播放
+                                    }
+                                    LocalControl::PedalOn(kind) => {
+                                        let cc = pedal_cc(kind);
+                                        events.push(TimedMidiEvent {
+                                            timestamp_us: track_tick * us_per_tick,
+                                            data: vec![0xB0 | channel, cc, 127],
+                                        });
+                                    }
+                                    LocalControl::PedalOff(kind) => {
+                                        let cc = pedal_cc(kind);
+                                        events.push(TimedMidiEvent {
+                                            timestamp_us: track_tick * us_per_tick,
+                                            data: vec![0xB0 | channel, cc, 0],
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -113,15 +125,19 @@ fn build_event_timeline(score: &Score, ppq: u16) -> Vec<TimedMidiEvent> {
                 }
             }
         }
-
-        if track_tick > current_tick {
-            current_tick = track_tick;
-        }
     }
 
     // 按时间戳排序
     events.sort_by_key(|e| e.timestamp_us);
     events
+}
+
+fn pedal_cc(kind: &PedalKind) -> u8 {
+    match kind {
+        PedalKind::Sustain => 64,
+        PedalKind::Soft => 67,
+        PedalKind::Sostenuto => 66,
+    }
 }
 
 fn duration_to_ticks(duration: &Duration, ppq: u16) -> u32 {
@@ -184,13 +200,16 @@ pub fn play_score_with_port(score: &Score, port_index: Option<usize>) -> Result<
 
     // 实时播放
     let start = Instant::now();
+    let mut send_errors = 0;
     for event in &events {
         let target = StdDuration::from_micros(event.timestamp_us);
         let elapsed = start.elapsed();
         if elapsed < target {
             thread::sleep(target - elapsed);
         }
-        let _ = conn.send(&event.data);
+        if conn.send(&event.data).is_err() {
+            send_errors += 1;
+        }
     }
 
     // 等待最后一个音符结束
@@ -199,6 +218,10 @@ pub fn play_score_with_port(score: &Score, port_index: Option<usize>) -> Result<
     // 关闭所有音符（All Notes Off）
     for ch in 0u8..16 {
         let _ = conn.send(&[0xB0 | ch, 123, 0]);
+    }
+
+    if send_errors > 0 {
+        eprintln!("警告: {} 个 MIDI 事件发送失败", send_errors);
     }
 
     Ok(())

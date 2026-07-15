@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    ".",
     "analysis",
     "player",
 ]
@@ -9,7 +8,17 @@ members = [
 name = "score_analysis"
 version = "0.1.0"
 edition = "2024"
+description = "ScoreLang 乐谱解析与 MIDI 处理库"
+authors = ["you"]
+license = "MIT OR Apache-2.0"
+repository = ""
+
+[lib]
+name = "score_analysis"
+path = "src/lib.rs"
 
 [dependencies]
 analysis = { path = "analysis" }
 player = { path = "player" }
+
+[dev-dependencies]

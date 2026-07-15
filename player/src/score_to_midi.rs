@@ -1,6 +1,6 @@
 //! Score → MIDI 事件转换器
 
-use analysis::kind::score::{Score, Track, MeasureEvent, LocalControl};
+use analysis::kind::score::{Score, Track, MeasureEvent, LocalControl, PedalKind};
 use analysis::kind::note_value::Duration;
 
 use crate::midi_writer::{MidiFile, MidiTrack, note_on, note_off, program_change, control_change, tempo_meta};
@@ -107,6 +107,14 @@ fn convert_track(track: &Track, channel: u8, ppq: u16) -> MidiTrack {
                                 LocalControl::LocalKey(_) | LocalControl::LocalTime(_) => {
                                     // 局部调号和拍号不影响 MIDI 音高
                                 }
+                                LocalControl::PedalOn(kind) => {
+                                    let cc = pedal_cc(kind);
+                                    midi_track.add_event(0, control_change(channel, cc, 127));
+                                }
+                                LocalControl::PedalOff(kind) => {
+                                    let cc = pedal_cc(kind);
+                                    midi_track.add_event(0, control_change(channel, cc, 0));
+                                }
                             }
                         }
                     }
@@ -116,6 +124,15 @@ fn convert_track(track: &Track, channel: u8, ppq: u16) -> MidiTrack {
     }
 
     midi_track
+}
+
+/// 踏板类型 → MIDI CC 编号
+fn pedal_cc(kind: &PedalKind) -> u8 {
+    match kind {
+        PedalKind::Sustain => 64,
+        PedalKind::Soft => 67,
+        PedalKind::Sostenuto => 66,
+    }
 }
 
 #[cfg(test)]

@@ -1,11 +1,11 @@
 use super::lexer::Lexer;
-use super::token::{Token, SpannedToken, Span};
+use super::token::{Token, SpannedToken, Span, LexError};
 use crate::kind::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
     UnexpectedToken { expected: String, got: String, span: Span },
-    LexError(String),
+    LexError(LexError),
     Eof,
 }
 
@@ -15,9 +15,17 @@ impl std::fmt::Display for ParseError {
             ParseError::UnexpectedToken { expected, got, span } => {
                 write!(f, "{}: 期望 {}, 得到 {}", span, expected, got)
             }
-            ParseError::LexError(msg) => write!(f, "词法错误: {}", msg),
+            ParseError::LexError(e) => write!(f, "词法错误: {}", e),
             ParseError::Eof => write!(f, "意外的文件结束"),
         }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+impl From<LexError> for ParseError {
+    fn from(e: LexError) -> Self {
+        ParseError::LexError(e)
     }
 }
 
@@ -27,31 +35,28 @@ pub struct Parser {
     track_counter: usize,
     measure_counter: u32,
     pub errors: Vec<ParseError>,
+    current_key: Option<Key>,
 }
 
 impl Parser {
     pub fn new(input: &str) -> Self {
         let mut lexer = Lexer::new(input);
         let tokens = lexer.tokenize_all();
-        let mut errors = Vec::new();
-        for e in lexer.errors {
-            errors.push(ParseError::LexError(e.to_string()));
-        }
+        let errors: Vec<ParseError> = lexer.errors.into_iter().map(ParseError::LexError).collect();
         Self {
             tokens,
             pos: 0,
             track_counter: 0,
             measure_counter: 0,
             errors,
+            current_key: None,
         }
     }
 
     fn peek(&self) -> &SpannedToken {
-        if self.pos < self.tokens.len() {
-            &self.tokens[self.pos]
-        } else {
-            self.tokens.last().unwrap()
-        }
+        self.tokens.get(self.pos)
+            .unwrap_or_else(|| self.tokens.last()
+                .expect("token 序列不应为空：tokenize_all 保证至少返回 Eof"))
     }
 
     fn advance(&mut self) -> SpannedToken {
@@ -67,14 +72,24 @@ impl Parser {
         if std::mem::discriminant(&t.token) == std::mem::discriminant(expected) {
             Ok(self.advance())
         } else {
-            let err = ParseError::UnexpectedToken {
+            Err(ParseError::UnexpectedToken {
                 expected: desc.to_string(),
                 got: format!("{:?}", t.token),
                 span: t.span,
-            };
-            self.errors.push(err.clone());
-            Err(err)
+            })
         }
+    }
+
+    /// 记录错误并跳过当前 token（错误恢复辅助）
+    fn skip_token_with_error(&mut self, expected: &str) {
+        let t = self.peek().clone();
+        let err = ParseError::UnexpectedToken {
+            expected: expected.to_string(),
+            got: format!("{:?}", t.token),
+            span: t.span,
+        };
+        self.errors.push(err);
+        self.advance();
     }
 
     fn check(&self, expected: &Token) -> bool {
@@ -91,21 +106,48 @@ impl Parser {
         self.measure_counter = 0;
         self.track_counter = 0;
 
+        // 全局控制
         while !self.check(&Token::Eof) && !self.check(&Token::Track) {
             if self.check(&Token::At) {
-                self.parse_global(&mut score)?;
+                if let Err(e) = self.parse_global(&mut score) {
+                    self.errors.push(e);
+                    self.skip_to_next_global_or_track();
+                }
             } else {
-                break;
+                self.skip_token_with_error("@ 或 track");
             }
         }
 
+        // 音轨
         while self.check(&Token::Track) {
-            let track = self.parse_track()?;
-            score.push_track(track);
+            match self.parse_track() {
+                Ok(track) => score.push_track(track),
+                Err(e) => {
+                    self.errors.push(e);
+                    self.skip_to_next_track();
+                }
+            }
         }
 
-        self.expect(&Token::Eof, "文件结束")?;
+        // 允许末尾有非 Eof 的垃圾 token（已作为错误记录）
+        if !self.check(&Token::Eof) {
+            self.skip_token_with_error("文件结束");
+        }
         Ok(score)
+    }
+
+    /// 跳过 token 直到遇到下一个 @ 或 track 或 Eof
+    fn skip_to_next_global_or_track(&mut self) {
+        while !self.check(&Token::Eof) && !self.check(&Token::At) && !self.check(&Token::Track) {
+            self.advance();
+        }
+    }
+
+    /// 跳过 token 直到遇到下一个 track 或 Eof
+    fn skip_to_next_track(&mut self) {
+        while !self.check(&Token::Eof) && !self.check(&Token::Track) {
+            self.advance();
+        }
     }
 
     fn parse_global(&mut self, score: &mut Score) -> Result<(), ParseError> {
@@ -114,6 +156,7 @@ impl Parser {
         match &t.token {
             Token::KeySet => {
                 let key = self.parse_key_control(false)?;
+                self.current_key = Some(key);
                 score.set_global_key(key);
             }
             Token::TempoSet => {
@@ -212,13 +255,49 @@ impl Parser {
                 Accidental::Natural
             }
         } else {
-            Accidental::Natural
+            if let Some(key) = &self.current_key {
+                key.accidental_for_note_name(name)
+            } else {
+                Accidental::Natural
+            }
         };
         Ok(PitchClass::new(name, acc))
     }
 
     fn parse_pitch(&mut self) -> Result<Pitch, ParseError> {
         let pc = self.parse_pitch_class()?;
+        if self.check(&Token::Number(0)) {
+            let num_tok = self.advance();
+            if let Token::Number(n) = num_tok.token {
+                Ok(Pitch::with_octave(pc.name, pc.acc, n as u8))
+            } else {
+                Ok(Pitch::without_octave(pc.name, pc.acc))
+            }
+        } else {
+            Ok(Pitch::without_octave(pc.name, pc.acc))
+        }
+    }
+
+    /// 解析音级（不应用调号，用于和弦根音/低音——和弦符号是绝对音高）
+    fn parse_pitch_class_no_key(&mut self) -> Result<PitchClass, ParseError> {
+        let name_tok = self.expect(&Token::NoteName('C'), "音名 (CDEFGAB)")?;
+        let name = if let Token::NoteName(c) = name_tok.token { c } else { 'C' };
+        let acc = if self.check(&Token::Accidental("".into())) {
+            let acc_tok = self.advance();
+            if let Token::Accidental(s) = acc_tok.token {
+                Accidental::from_str(&s)
+            } else {
+                Accidental::Natural
+            }
+        } else {
+            Accidental::Natural
+        };
+        Ok(PitchClass::new(name, acc))
+    }
+
+    /// 解析音高（不应用调号，用于和弦低音）
+    fn parse_pitch_no_key(&mut self) -> Result<Pitch, ParseError> {
+        let pc = self.parse_pitch_class_no_key()?;
         if self.check(&Token::Number(0)) {
             let num_tok = self.advance();
             if let Token::Number(n) = num_tok.token {
@@ -280,13 +359,22 @@ impl Parser {
     fn parse_instrument_assign(&mut self) -> Result<Instrument, ParseError> {
         self.expect(&Token::Instrument, "inst")?;
         self.expect(&Token::Lpar, "(")?;
-        let kind = if self.check(&Token::Piano) {
-            self.advance();
-            InstrumentKind::Piano
+        let name_tok = self.expect(&Token::InstrumentName("".into()), "乐器名")?;
+        let kind = if let Token::InstrumentName(name) = name_tok.token {
+            match InstrumentKind::from_str(&name) {
+                Some(k) => k,
+                None => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "有效的乐器名".to_string(),
+                        got: format!("\"{}\"", name),
+                        span: name_tok.span,
+                    });
+                }
+            }
         } else {
             let t = self.peek();
             return Err(ParseError::UnexpectedToken {
-                expected: "乐器名 (piano)".to_string(),
+                expected: "乐器名".to_string(),
                 got: format!("{:?}", t.token),
                 span: t.span,
             });
@@ -353,13 +441,7 @@ impl Parser {
                     measure.push_event(MeasureEvent::Note(note));
                 }
                 _ => {
-                    let err = ParseError::UnexpectedToken {
-                        expected: "音符/休止符/和弦/控制命令".to_string(),
-                        got: format!("{:?}", t.token),
-                        span: t.span,
-                    };
-                    self.errors.push(err.clone());
-                    self.advance();
+                    self.skip_token_with_error("音符/休止符/和弦/控制命令");
                 }
             }
         }
@@ -380,7 +462,7 @@ impl Parser {
 
     fn parse_chord(&mut self, track_id: usize) -> Result<Chord, ParseError> {
         self.expect(&Token::Lbrack, "[")?;
-        let root_pc = self.parse_pitch_class()?;
+        let root_pc = self.parse_pitch_class_no_key()?;
         let mut symbol = ChordSymbol::new(root_pc);
 
         if self.check(&Token::ChordQuality("".into())) {
@@ -409,7 +491,7 @@ impl Parser {
 
         let chord = if self.check(&Token::Slash) {
             self.advance();
-            let bass = self.parse_pitch()?;
+            let bass = self.parse_pitch_no_key()?;
             self.expect(&Token::Rbrack, "]")?;
             let dur = self.parse_duration()?;
             Chord::new_slash(symbol, bass, dur, track_id)
@@ -428,6 +510,7 @@ impl Parser {
         match &t.token {
             Token::KeySet => {
                 let key = self.parse_key_control(true)?;
+                self.current_key = Some(key);
                 Ok(LocalControl::LocalKey(key))
             }
             Token::TempoSet => {
@@ -438,15 +521,53 @@ impl Parser {
                 let ts = self.parse_time_control(true)?;
                 Ok(LocalControl::LocalTime(ts))
             }
-            _ => {
-                let err = ParseError::UnexpectedToken {
-                    expected: "局部控制 (key/tempo/time)".to_string(),
-                    got: format!("{:?}", t.token),
-                    span: t.span,
-                };
-                self.errors.push(err.clone());
-                Err(err)
+            Token::PedalOn => {
+                self.advance();
+                self.expect(&Token::Lpar, "(")?;
+                let kind = self.parse_pedal_kind()?;
+                self.expect(&Token::Rpar, ")")?;
+                Ok(LocalControl::PedalOn(kind))
             }
+            Token::PedalOff => {
+                self.advance();
+                self.expect(&Token::Lpar, "(")?;
+                let kind = self.parse_pedal_kind()?;
+                self.expect(&Token::Rpar, ")")?;
+                Ok(LocalControl::PedalOff(kind))
+            }
+            _ => {
+                let got = format!("{:?}", t.token);
+                let span = t.span;
+                self.skip_token_with_error("局部控制 (key/tempo/time/pedal_on/pedal_off)");
+                return Err(ParseError::UnexpectedToken {
+                    expected: "局部控制 (key/tempo/time/pedal_on/pedal_off)".to_string(),
+                    got,
+                    span,
+                });
+            }
+        }
+    }
+
+    fn parse_pedal_kind(&mut self) -> Result<crate::kind::PedalKind, ParseError> {
+        let name_tok = self.expect(&Token::InstrumentName("".into()), "踏板类型 (sustain/soft/sostenuto)")?;
+        if let Token::InstrumentName(name) = name_tok.token {
+            match name.as_str() {
+                "sustain" => Ok(crate::kind::PedalKind::Sustain),
+                "soft" => Ok(crate::kind::PedalKind::Soft),
+                "sostenuto" => Ok(crate::kind::PedalKind::Sostenuto),
+                _ => Err(ParseError::UnexpectedToken {
+                    expected: "sustain / soft / sostenuto".to_string(),
+                    got: format!("\"{}\"", name),
+                    span: name_tok.span,
+                }),
+            }
+        } else {
+            let t = self.peek();
+            Err(ParseError::UnexpectedToken {
+                expected: "踏板类型 (sustain/soft/sostenuto)".to_string(),
+                got: format!("{:?}", t.token),
+                span: t.span,
+            })
         }
     }
 }
@@ -463,7 +584,7 @@ pub fn parse_score(input: &str) -> Result<Score, Vec<ParseError>> {
         }
         Err(e) => {
             let mut errors = parser.errors;
-            if !errors.iter().any(|x| format!("{}", x) == format!("{}", e)) {
+            if !errors.contains(&e) {
                 errors.push(e);
             }
             Err(errors)
@@ -601,5 +722,156 @@ track "PianoTrack" inst(piano) {
         let notes = score.all_notes();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].midi_key(), Some(63));
+    }
+
+    #[test]
+    fn test_error_recovery_multiple_errors() {
+        // 两个错误：无效字符 ! 和无效字符 ?
+        let result = parse_score("track \"P\" inst(piano) { section \"S\" { ! C4f4 ? D4f4 | } }");
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        // 应该收集到至少 2 个错误（! 和 ?），但仍能恢复解析出 C4 和 D4
+        assert!(errors.len() >= 2, "应收集多个错误，实际: {}", errors.len());
+    }
+
+    #[test]
+    fn test_error_recovery_continues_after_bad_token() {
+        // 错误 token 后应继续解析有效音符
+        let result = parse_score("track \"P\" inst(piano) { section \"S\" { ! C4f4 | } }");
+        // 错误输入应返回 Err（有词法/语法错误）
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_error_is_std_error() {
+        let err = ParseError::Eof;
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn test_lex_error_is_std_error() {
+        let err = LexError::UnknownChar(Span::zero(), '!');
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn test_parse_error_partial_eq() {
+        let e1 = ParseError::Eof;
+        let e2 = ParseError::Eof;
+        assert_eq!(e1, e2);
+
+        let s = Span::new(1, 2, 1);
+        let e3 = ParseError::UnexpectedToken {
+            expected: "x".to_string(),
+            got: "y".to_string(),
+            span: s,
+        };
+        let e4 = ParseError::UnexpectedToken {
+            expected: "x".to_string(),
+            got: "y".to_string(),
+            span: s,
+        };
+        assert_eq!(e3, e4);
+    }
+
+    #[test]
+    fn test_dedup_no_duplicate_errors() {
+        // 确保 expect 不再重复记录错误
+        let result = parse_score("track \"P\" inst(piano) { section \"S\" { ! | } }");
+        if let Err(errors) = result {
+            // 不应有重复错误
+            for i in 0..errors.len() {
+                for j in (i+1)..errors.len() {
+                    assert_ne!(errors[i], errors[j], "发现重复错误: {:?}", errors[i]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_key_signature_applies_to_notes() {
+        // G 大调中，F 自动升半音
+        let src = r#"
+@key(G major)
+@time(4/4)
+track "P" inst(piano) {
+  section "S" {
+      F4f4 C4f4 |
+  }
+}
+"#;
+        let score = parse_score(src).unwrap();
+        let notes = score.all_notes();
+        assert_eq!(notes.len(), 2);
+        // F 在 G 大调中应为 F# (MIDI 66)
+        assert_eq!(notes[0].midi_key(), Some(66), "G 大调中 F 应自动升为 F#");
+        // C 保持自然 (MIDI 60)
+        assert_eq!(notes[1].midi_key(), Some(60), "G 大调中 C 保持自然");
+    }
+
+    #[test]
+    fn test_explicit_accidental_overrides_key() {
+        // 显式写的临时记号覆盖调号
+        let src = r#"
+@key(G major)
+@time(4/4)
+track "P" inst(piano) {
+  section "S" {
+      F4f4 F#4f4 |
+  }
+}
+"#;
+        let score = parse_score(src).unwrap();
+        let notes = score.all_notes();
+        assert_eq!(notes.len(), 2);
+        // 未写记号的 F 按调号升半音 → F# (66)
+        assert_eq!(notes[0].midi_key(), Some(66));
+        // 显式写了 # 的还是 F# (66)，结果一样
+        assert_eq!(notes[1].midi_key(), Some(66));
+    }
+
+    #[test]
+    fn test_chord_root_ignores_key_signature() {
+        // 和弦符号是绝对的，不应用调号
+        let src = r#"
+@key(G major)
+@time(4/4)
+track "P" inst(piano) {
+  section "S" {
+      [F]f2 |
+  }
+}
+"#;
+        let score = parse_score(src).unwrap();
+        let chords = score.all_chords();
+        assert_eq!(chords.len(), 1);
+        // F 和弦根音是 F (MIDI 65 的 F3 之类)，不是 F#
+        let midi_notes = chords[0].midi_notes();
+        // F 大三和弦: F-A-C，最低音是 F
+        assert!(midi_notes.contains(&65) || midi_notes.contains(&53),
+                "F 和弦应包含 F 音，不应因调号变 F#");
+        assert!(!midi_notes.contains(&66) && !midi_notes.contains(&54),
+                "F 和弦不应包含 F# 音");
+    }
+
+    #[test]
+    fn test_f_major_b_flat() {
+        // F 大调中，B 自动降半音
+        let src = r#"
+@key(F major)
+@time(4/4)
+track "P" inst(piano) {
+  section "S" {
+      B4f4 F4f4 |
+  }
+}
+"#;
+        let score = parse_score(src).unwrap();
+        let notes = score.all_notes();
+        assert_eq!(notes.len(), 2);
+        // B 在 F 大调中应为 Bb (MIDI 70)
+        assert_eq!(notes[0].midi_key(), Some(70), "F 大调中 B 应自动降为 Bb");
+        // F 保持自然 (MIDI 65)
+        assert_eq!(notes[1].midi_key(), Some(65));
     }
 }

@@ -48,13 +48,15 @@ pub enum Token {
 
     Track, Section, Repeat, Instrument,
 
-    Piano,
+    PedalOn, PedalOff,
 
     NoteName(char),
 
     Accidental(String),
 
     Number(u64),
+
+    InstrumentName(String),
 
     ChordQuality(String),
     ChordAlter(String),
@@ -66,7 +68,7 @@ pub enum Token {
     Eof,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LexError {
     UnclosedString(Span),
     UnknownChar(Span, char),
@@ -80,3 +82,5 @@ impl std::fmt::Display for LexError {
         }
     }
 }
+
+impl std::error::Error for LexError {}

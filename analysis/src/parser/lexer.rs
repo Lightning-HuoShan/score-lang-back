@@ -143,7 +143,7 @@ impl Lexer {
         buf.reserve(16);
         loop {
             match self.peek(1) {
-                Some(c) if c.is_ascii_alphabetic() => {
+                Some(c) if c.is_ascii_alphabetic() || c == '_' => {
                     self.advance();
                     buf.push(c);
                 }
@@ -194,12 +194,17 @@ impl Lexer {
             "section" => Token::Section,
             "repeat" => Token::Repeat,
             "inst" => Token::Instrument,
-            "piano" => Token::Piano,
+            "pedal_on" => Token::PedalOn,
+            "pedal_off" => Token::PedalOff,
             "maj" | "min" | "m" | "dim" | "aug" | "sus" => Token::ChordQuality(s.to_string()),
             "add" | "flat" | "sharp" | "no" => Token::ChordAlter(s.to_string()),
             "f" => Token::For,
             "b" | "bb" | "x" => Token::Accidental(s.to_string()),
-            _ => Token::UnknownChar(s.chars().next().unwrap_or('?')),
+            _ => {
+                // 未匹配关键字的标识符统一作为 InstrumentName，
+                // 由解析器根据上下文验证是否为有效名称
+                Token::InstrumentName(s.to_string())
+            },
         }
     }
 
