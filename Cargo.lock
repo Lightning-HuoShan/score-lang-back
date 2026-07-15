@@ -25,6 +25,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "analysis"
+version = "0.1.0"
+
+[[package]]
 name = "android-build"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -364,6 +368,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
+name = "player"
+version = "0.1.0"
+dependencies = [
+ "analysis",
+ "midir",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -415,7 +427,8 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "score_analysis"
 version = "0.1.0"
 dependencies = [
- "midir",
+ "analysis",
+ "player",
 ]
 
 [[package]]

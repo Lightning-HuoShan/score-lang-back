@@ -1,28 +1,39 @@
 //! 实时 MIDI 播放器
+//!
+//! 通过 midir 连接系统 MIDI 合成器，实时播放 Score
 
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 
 use midir::MidiOutput;
 
-use crate::analysis::kind::score::{Score, MeasureEvent, LocalControl, PedalKind};
-use crate::analysis::kind::note_value::Duration;
+use analysis::kind::score::{Score, MeasureEvent, LocalControl, PedalKind};
+use analysis::kind::note_value::Duration;
 
+/// 播放速度倍率
 const DEFAULT_PPQ: u16 = 480;
 
+/// 带绝对时间戳的 MIDI 事件
 struct TimedMidiEvent {
+    /// 从播放开始的微秒数
     timestamp_us: u64,
     data: Vec<u8>,
 }
 
+/// 将 Score 转换为带时间戳的 MIDI 事件序列
 fn build_event_timeline(score: &Score, ppq: u16) -> Vec<TimedMidiEvent> {
     let bpm = score.global_bpm().max(1) as u64;
     let us_per_tick = 60_000_000 / (bpm * ppq as u64);
     let mut events = Vec::new();
 
+    // 注意：实时 MIDI 协议不传输 SMF meta 事件（0xFF...），
+    // tempo 已被烘焙进下方各事件的 timestamp_us（通过 us_per_tick 换算），
+    // 因此无需也不应在此推送 Tempo Meta 事件。
+
     for (track_idx, track) in score.tracks.iter().enumerate() {
         let channel = (track_idx as u8).min(15);
 
+        // 乐器设置（时间 0）
         if let Some(ref inst) = track.instrument {
             events.push(TimedMidiEvent {
                 timestamp_us: 0,
@@ -69,6 +80,7 @@ fn build_event_timeline(score: &Score, ppq: u16) -> Vec<TimedMidiEvent> {
                                 let ticks = duration_to_ticks(&chord.duration, ppq);
                                 let notes = chord.midi_notes();
                                 let vel = chord.midi_velocity();
+                                // Note On
                                 for &midi_note in &notes {
                                     events.push(TimedMidiEvent {
                                         timestamp_us: track_tick * us_per_tick,
@@ -76,6 +88,7 @@ fn build_event_timeline(score: &Score, ppq: u16) -> Vec<TimedMidiEvent> {
                                     });
                                 }
                                 track_tick += ticks as u64;
+                                // Note Off
                                 for &midi_note in &notes {
                                     events.push(TimedMidiEvent {
                                         timestamp_us: track_tick * us_per_tick,
@@ -85,8 +98,12 @@ fn build_event_timeline(score: &Score, ppq: u16) -> Vec<TimedMidiEvent> {
                             }
                             MeasureEvent::Control(control) => {
                                 match control {
-                                    LocalControl::LocalTempo(_) => {}
-                                    LocalControl::LocalKey(_) | LocalControl::LocalTime(_) => {}
+                                    LocalControl::LocalTempo(_) => {
+                                        // 局部速度变化暂不支持实时调整
+                                    }
+                                    LocalControl::LocalKey(_) | LocalControl::LocalTime(_) => {
+                                        // 局部调号和拍号不影响实时播放
+                                    }
                                     LocalControl::PedalOn(kind) => {
                                         let cc = pedal_cc(kind);
                                         events.push(TimedMidiEvent {
@@ -110,6 +127,7 @@ fn build_event_timeline(score: &Score, ppq: u16) -> Vec<TimedMidiEvent> {
         }
     }
 
+    // 按时间戳排序
     events.sort_by_key(|e| e.timestamp_us);
     events
 }
@@ -127,6 +145,7 @@ fn duration_to_ticks(duration: &Duration, ppq: u16) -> u32 {
     (quarter_notes * ppq as f32).round() as u32
 }
 
+/// 列出可用的 MIDI 输出端口
 pub fn list_output_ports() -> Result<Vec<String>, String> {
     let midi_out = MidiOutput::new("ScoreAnalysis").map_err(|e| e.to_string())?;
     let ports = midi_out.ports();
@@ -138,10 +157,16 @@ pub fn list_output_ports() -> Result<Vec<String>, String> {
     Ok(result)
 }
 
+/// 播放 Score
+///
+/// 使用系统默认 MIDI 输出端口（或第一个可用端口）实时播放
 pub fn play_score(score: &Score) -> Result<(), String> {
     play_score_with_port(score, None)
 }
 
+/// 使用指定端口播放 Score
+///
+/// port_index: None 表示使用第一个可用端口
 pub fn play_score_with_port(score: &Score, port_index: Option<usize>) -> Result<(), String> {
     let midi_out = MidiOutput::new("ScoreAnalysis").map_err(|e| e.to_string())?;
 
@@ -161,6 +186,7 @@ pub fn play_score_with_port(score: &Score, port_index: Option<usize>) -> Result<
     let mut conn = midi_out.connect(&ports[port_idx], "score-analysis-player")
         .map_err(|e| e.to_string())?;
 
+    // 构建事件时间线
     let events = build_event_timeline(score, DEFAULT_PPQ);
 
     if events.is_empty() {
@@ -172,6 +198,7 @@ pub fn play_score_with_port(score: &Score, port_index: Option<usize>) -> Result<
     let total_secs = total_us as f64 / 1_000_000.0;
     println!("总时长: {:.1} 秒, 事件数: {}", total_secs, events.len());
 
+    // 实时播放
     let start = Instant::now();
     let mut send_errors = 0;
     for event in &events {
@@ -185,8 +212,10 @@ pub fn play_score_with_port(score: &Score, port_index: Option<usize>) -> Result<
         }
     }
 
+    // 等待最后一个音符结束
     thread::sleep(StdDuration::from_millis(500));
 
+    // 关闭所有音符（All Notes Off）
     for ch in 0u8..16 {
         let _ = conn.send(&[0xB0 | ch, 123, 0]);
     }
@@ -198,6 +227,7 @@ pub fn play_score_with_port(score: &Score, port_index: Option<usize>) -> Result<
     Ok(())
 }
 
+/// 非阻塞播放：在新线程中播放 Score
 pub fn play_score_async(score: &Score) -> thread::JoinHandle<Result<(), String>> {
     let score = score.clone();
     thread::spawn(move || play_score(&score))

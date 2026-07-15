@@ -15,7 +15,8 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-pub fn export_midi(score: &crate::analysis::kind::score::Score, path: &Path) -> std::io::Result<()> {
+/// 将 Score 导出为 MIDI 文件
+pub fn export_midi(score: &analysis::kind::score::Score, path: &Path) -> std::io::Result<()> {
     let midi = score_to_midi(score);
     let bytes = midi.to_bytes();
     let mut file = fs::File::create(path)?;
@@ -23,8 +24,9 @@ pub fn export_midi(score: &crate::analysis::kind::score::Score, path: &Path) -> 
     Ok(())
 }
 
+/// 将 Score 导出为 MIDI 文件，指定 PPQ
 pub fn export_midi_with_ppq(
-    score: &crate::analysis::kind::score::Score,
+    score: &analysis::kind::score::Score,
     path: &Path,
     ppq: u16,
 ) -> std::io::Result<()> {
